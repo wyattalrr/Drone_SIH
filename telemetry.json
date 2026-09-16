@@ -1,0 +1,12 @@
+{
+  "flight_mode": "STANDBY / LANDED",
+  "status": "CAMERA_OFFLINE",
+  "timestamp": 1789592968.4223914,
+  "battery_pct": 0.0,
+  "altitude_m": 0.0,
+  "speed_mps": 0.0,
+  "heading_deg": 0,
+  "active_survivors": 0,
+  "active_hazards": 0,
+  "thermal_mode": false
+}

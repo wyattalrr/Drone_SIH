@@ -1,0 +1,13 @@
+[
+  {
+    "id": 1,
+    "name": "Keshav Khandelwal",
+    "type": "Survivor",
+    "status": "MOVING",
+    "posture": "Unknown",
+    "priority": "HIGH",
+    "priority_percent": 27,
+    "lat": 26.9127,
+    "lon": 75.7876
+  }
+]
