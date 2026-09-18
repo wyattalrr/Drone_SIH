@@ -1,3 +1,6 @@
+import os
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'   # prevents OpenMP crash (0xC0000409) when CUDA + multiple libs loaded
+os.environ['OMP_NUM_THREADS'] = '1'            # stabilizes OpenMP threading on Windows
 from ultralytics import YOLO
 import cv2
 import time
@@ -7,6 +10,7 @@ import os
 import argparse
 import numpy as np
 import torch
+import sys
 import winsound
 from insightface.app import FaceAnalysis
 
@@ -25,6 +29,17 @@ def atomic_write_json(filepath, data):
     except Exception:
         pass
 
+
+def atomic_write_frame(filepath, frame_bgr):
+    """Write an OpenCV BGR frame as JPEG for Streamlit live feed without NTFS rename locking."""
+    try:
+        ok, buf = cv2.imencode(".jpg", frame_bgr, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        if ok:
+            with open(filepath, "wb") as f:
+                f.write(buf.tobytes())
+    except Exception:
+        pass
+
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"Running YOLO models on: {DEVICE}")
 
@@ -36,17 +51,12 @@ pose_model = YOLO("yolov8n-pose.pt")
 face_app = FaceAnalysis(name="buffalo_l", providers=["CPUExecutionProvider"])
 face_app.prepare(ctx_id=0, det_size=(320, 320))
 
-src = int(args.source) if args.source.isdigit() else args.source
-if isinstance(src, int):
-    cap = cv2.VideoCapture(src, cv2.CAP_DSHOW)
-else:
-    cap = cv2.VideoCapture(src)
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-
+cap = None
+src = None
 thermal_mode = False
 
 LORA_PACKETS_FILE = "lora_packets.json"
+LIVE_FRAME_FILE = "live_frame.jpg"   # shared annotated frame for Streamlit live feed
 lora_transmission_history = []
 lora_seq_id = 1
 last_lora_broadcast_time = 0.0
@@ -79,7 +89,7 @@ HAZARD_PROXIMITY_PX = 250
 POSE_MATCH_RADIUS = 45   # tightened from 80 — reduces posture bleeding from a nearby different person
 MATCH_THRESHOLD = 0.5   # cosine SIMILARITY (not distance) — higher = more similar. TUNE using the
                          # [DEBUG] similarity printouts below once you test with real people.
-PERSON_CONF = 0.5        # raise to 0.6-0.65 if false-positive "person" boxes appear
+PERSON_CONF = 0.35       # lowered from 0.5 — improves detection on close-up webcam (partial body visible); raise to 0.5-0.6 if false positives appear
 
 AGE_RISK_LOW = 10        # age <= this counts as higher-risk (child)
 AGE_RISK_HIGH = 60       # age >= this counts as higher-risk (elderly)
@@ -290,6 +300,126 @@ def assign_id(center, tracked_people, claimed_ids):
     return new_id
 
 
+def initialize_capture(source):
+    """
+    Robustly initialize video capture.
+    Tries multiple backends (CAP_DSHOW, standard) and tests reading frames.
+    If a requested camera index fails (e.g. index 0), automatically probes fallback
+    camera indices (e.g. index 1) to ensure the perception engine finds a working camera device.
+    """
+    is_cam_idx = False
+    try:
+        req_idx = int(source)
+        is_cam_idx = True
+    except (ValueError, TypeError):
+        req_idx = source
+
+    if not is_cam_idx:
+        print(f"[*] Opening video source / file: {req_idx}", flush=True)
+        c = cv2.VideoCapture(req_idx)
+        if c.isOpened():
+            ret, _ = c.read()
+            if ret:
+                c.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                return c, req_idx
+        print(f"[ERROR] Failed to open video file/stream: {req_idx}", flush=True)
+        return None, req_idx
+
+    # Candidate camera indices: requested index first, then common alternatives
+    candidates = [req_idx]
+    for alt in [1, 0, 2, 3]:
+        if alt not in candidates:
+            candidates.append(alt)
+
+    for idx in candidates:
+        is_requested = (idx == req_idx)
+        prefix = f"[*] Connecting to camera index {idx}" if is_requested else f"[*] Probing fallback camera index {idx}"
+        print(f"{prefix}...", flush=True)
+
+        backends = [cv2.CAP_DSHOW, cv2.CAP_ANY]
+        for backend in backends:
+            backend_name = "DirectShow" if backend == cv2.CAP_DSHOW else "Default"
+            try:
+                c = cv2.VideoCapture(idx, backend)
+                if not c.isOpened():
+                    c.release()
+                    continue
+                c.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                c.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                print(f"[*] Camera {idx} opened via {backend_name} — validating live video stream...", flush=True)
+                time.sleep(0.6)   # brief settle time for hardware auto-exposure
+                got_frame = False
+                clean_count = 0
+                for _ in range(15):
+                    ret, test_frame = c.read()
+                    if ret and test_frame is not None:
+                        # Sanity-check: reject pure-noise / all-black frames
+                        mean_val = float(np.mean(test_frame))
+                        std_val = float(np.std(test_frame))
+                        # Must have real light (mean > 4.0) and spatial contrast (std > 4.0)
+                        if mean_val > 4.0 and 4.0 < std_val < 95.0:
+                            clean_count += 1
+                            if clean_count >= 2:
+                                got_frame = True
+                                break
+                        else:
+                            clean_count = 0
+                    time.sleep(0.1)
+                if got_frame:
+                    print(f"[OK] Camera {idx} streaming clean frames via {backend_name} (640x480).", flush=True)
+                    return c, idx
+                else:
+                    print(f"[!] Camera {idx} ({backend_name}) dark or unreadable — trying next...", flush=True)
+                    c.release()
+            except Exception as e:
+                print(f"[!] Error trying camera {idx} ({backend_name}): {e}", flush=True)
+
+    return None, req_idx
+
+print("\n" + "=" * 70, flush=True)
+print("[*] Initializing camera perception sensor payload...", flush=True)
+cap, src = initialize_capture(args.source)
+
+if cap is None:
+    print("!" * 70, flush=True)
+    print(f"[FATAL] Could not initialize camera device (requested: {args.source}).", flush=True)
+    print("Troubleshooting steps:", flush=True)
+    print("  1. Verify your USB camera (QPC-1015) is connected securely.", flush=True)
+    print("  2. Check if another app (Windows Camera, browser, Zoom) is holding the feed.", flush=True)
+    print("  3. Check Windows Settings -> Privacy & Security -> Camera -> Allow desktop apps.", flush=True)
+    print("  4. Check the physical privacy shutter / lens cover on your camera.", flush=True)
+    print("!" * 70 + "\n", flush=True)
+    offline_telemetry = {
+        "flight_mode": "STANDBY / LANDED",
+        "status": "CAMERA_OFFLINE",
+        "timestamp": time.time(),
+        "battery_pct": 0.0,
+        "altitude_m": 0.0,
+        "speed_mps": 0.0,
+        "heading_deg": 0,
+        "active_survivors": 0,
+        "active_hazards": 0,
+        "thermal_mode": False
+    }
+    atomic_write_json("telemetry.json", offline_telemetry)
+    sys.exit(1)
+
+# Notify telemetry immediately that camera is active
+drone_init_telemetry = {
+    "flight_mode": "AUTO_LAWNMOWER_SURVEY",
+    "status": "CAMERA_ONLINE",
+    "timestamp": time.time(),
+    "active_survivors": 0,
+    "active_hazards": 0,
+    "thermal_mode": False,
+    "current_waypoint": SAR_WAYPOINTS[0]["id"],
+    "next_waypoint": SAR_WAYPOINTS[1]["id"],
+    "active_leg": SAR_WAYPOINTS[0]["leg"],
+    "search_grid_waypoints": SAR_WAYPOINTS
+}
+atomic_write_json("telemetry.json", drone_init_telemetry)
+print("[OK] Drone camera online. Perception pipeline active.\n" + "=" * 70 + "\n", flush=True)
+
 last_fire_boxes = []
 last_flood_boxes = []
 last_pose_data = []   # list of (center, posture)
@@ -297,7 +427,8 @@ frame_num = 0
 fps_frame_count = 0
 fps_timer = time.time()
 consecutive_read_failures = 0
-MAX_CONSECUTIVE_FAILURES = 30   # ~1-2 seconds of failures before we treat it as a real disconnect
+MAX_CONSECUTIVE_FAILURES = 30   # ~2-3 seconds of failures before we treat it as a real disconnect
+LIVE_FRAME_WRITE_EVERY = 2    # write shared JPEG every N frames (keeps Streamlit feed ~15-20 FPS without I/O overload)
 
 while True:
     ret, frame = cap.read()
@@ -307,11 +438,20 @@ while True:
             cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
             continue
         consecutive_read_failures += 1
-        print(f"Webcam frame grab failed ({consecutive_read_failures}/{MAX_CONSECUTIVE_FAILURES}) — retrying...")
+        print(f"Webcam frame grab failed ({consecutive_read_failures}/{MAX_CONSECUTIVE_FAILURES}) — retrying...", flush=True)
+        if consecutive_read_failures == 15 and isinstance(src, int):
+            print("[*] Attempting soft camera reconnection...", flush=True)
+            try:
+                cap.release()
+                cap = cv2.VideoCapture(src, cv2.CAP_MSMF)
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            except Exception:
+                pass
         if consecutive_read_failures >= MAX_CONSECUTIVE_FAILURES:
-            print("Webcam appears disconnected. Stopping.")
+            print("Webcam appears disconnected. Stopping.", flush=True)
             break
-        cv2.waitKey(50)
+        cv2.waitKey(100)
         continue
     consecutive_read_failures = 0
 
@@ -681,36 +821,58 @@ while True:
         fps = fps_frame_count / elapsed if elapsed > 0 else 0
         active_count = sum(1 for d in tracked_people.values() if d["active"])
         sensor_str = "FLIR THERMAL" if thermal_mode else "RGB"
-        print(f"FPS: {fps:.1f} | People in frame: {active_count} | Sensor: {sensor_str}")
+        print(f"FPS: {fps:.1f} | People in frame: {active_count} | Sensor: {sensor_str}", flush=True)
         fps_frame_count = 0
         fps_timer = time.time()
 
-    if not args.no_gui:
-        if thermal_mode:
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            thermal = cv2.applyColorMap(gray, cv2.COLORMAP_INFERNO)
-            display_frame = cv2.addWeighted(annotated, 0.60, thermal, 0.40, 0)
-            cv2.rectangle(display_frame, (10, 10), (330, 68), (0, 0, 0), -1)
-            cv2.putText(display_frame, "[THERMAL FLIR PAYLOAD]", (16, 32),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 165, 255), 2)
-            cv2.putText(display_frame, "Mode: IRONBOW | Press 'T': RGB", (16, 56),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
-        else:
-            display_frame = annotated
-            cv2.rectangle(display_frame, (10, 10), (330, 68), (0, 0, 0), -1)
-            cv2.putText(display_frame, "[RGB SENSOR PAYLOAD]", (16, 32),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
-            cv2.putText(display_frame, "Press 'T': Thermal FLIR | 'Q': Quit", (16, 56),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
+    # Build display/export frame (shared by OpenCV window AND Streamlit live feed)
+    if thermal_mode:
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        thermal_overlay = cv2.applyColorMap(gray, cv2.COLORMAP_INFERNO)
+        display_frame = cv2.addWeighted(annotated, 0.60, thermal_overlay, 0.40, 0)
+        cv2.rectangle(display_frame, (10, 10), (330, 68), (0, 0, 0), -1)
+        cv2.putText(display_frame, "[THERMAL FLIR PAYLOAD]", (16, 32),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 165, 255), 2)
+        cv2.putText(display_frame, "Mode: IRONBOW | Press 'T': RGB", (16, 56),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
+    else:
+        display_frame = annotated.copy()
+        cv2.rectangle(display_frame, (10, 10), (330, 68), (0, 0, 0), -1)
+        cv2.putText(display_frame, "[RGB SENSOR PAYLOAD]", (16, 32),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
+        cv2.putText(display_frame, "Press 'T': Thermal FLIR | 'Q': Quit", (16, 56),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
 
+    # Write shared JPEG frame for Streamlit live feed (every N frames to keep I/O light, plus immediate on frame 1)
+    if frame_num == 1 or frame_num % LIVE_FRAME_WRITE_EVERY == 0:
+        atomic_write_frame(LIVE_FRAME_FILE, display_frame)
+
+    if not args.no_gui:
         cv2.imshow("Disaster Response - Autonomous Drone Edge-AI", display_frame)
+
+        # Check if window was closed via 'X' button (only after initial frames to avoid false positives during window creation)
+        if frame_num > 5:
+            try:
+                prop = cv2.getWindowProperty("Disaster Response - Autonomous Drone Edge-AI", cv2.WND_PROP_AUTOSIZE)
+                if prop < 0:
+                    print("[*] Camera window closed by user.", flush=True)
+                    break
+            except cv2.error:
+                print("[*] Camera window closed by user.", flush=True)
+                break
+            except Exception:
+                pass
 
         key = cv2.waitKey(1) & 0xFF
         if key == ord('q'):
+            print("[*] User requested perception engine shutdown ('Q').", flush=True)
             break
         elif key == ord('t'):
             thermal_mode = not thermal_mode
-            print(f"Sensor payload switched: {'THERMAL FLIR' if thermal_mode else 'RGB'}")
+            print(f"Sensor payload switched: {'THERMAL FLIR' if thermal_mode else 'RGB'}", flush=True)
+    else:
+        # Headless mode: still poll for no-op delay to keep loop rate reasonable
+        cv2.waitKey(1)
 
 cap.release()
 if not args.no_gui:

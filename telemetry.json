@@ -1,12 +1,74 @@
 {
-  "flight_mode": "STANDBY / LANDED",
-  "status": "CAMERA_OFFLINE",
-  "timestamp": 1789592968.4223914,
-  "battery_pct": 0.0,
-  "altitude_m": 0.0,
-  "speed_mps": 0.0,
-  "heading_deg": 0,
-  "active_survivors": 0,
+  "lat": 26.913502,
+  "lon": 75.788484,
+  "altitude_m": 25.3,
+  "speed_mps": 4.3,
+  "battery_pct": 88.1,
+  "heading_deg": 229,
+  "flight_mode": "AUTO_LAWNMOWER_SURVEY",
+  "thermal_mode": false,
+  "timestamp": 1789759781.20792,
+  "active_survivors": 1,
   "active_hazards": 0,
-  "thermal_mode": false
+  "current_waypoint": "WP-06",
+  "next_waypoint": "WP-01",
+  "active_leg": "Leg 6: Egress",
+  "survey_progress_pct": 42,
+  "dist_to_icp_m": 422.8,
+  "rth_battery_budget": 15.6,
+  "rth_status": "SAFE_NOMINAL",
+  "nav_engine": "GPS_LOCK_RTK",
+  "satellites": 14,
+  "slam_lidar": {
+    "front_m": 3.9,
+    "left_m": 4.6,
+    "right_m": 3.2,
+    "rear_m": 6.0,
+    "obstacles": [],
+    "avoidance_action": "CLEAR_CORRIDOR"
+  },
+  "search_grid_waypoints": [
+    {
+      "id": "WP-01",
+      "lat": 26.9114,
+      "lon": 75.786,
+      "name": "Ingress Point",
+      "leg": "Leg 1: Ingress"
+    },
+    {
+      "id": "WP-02",
+      "lat": 26.9136,
+      "lon": 75.786,
+      "name": "Sweep North A",
+      "leg": "Leg 2: Northbound"
+    },
+    {
+      "id": "WP-03",
+      "lat": 26.9136,
+      "lon": 75.7873,
+      "name": "Cross East A",
+      "leg": "Leg 3: Cross Track"
+    },
+    {
+      "id": "WP-04",
+      "lat": 26.9114,
+      "lon": 75.7873,
+      "name": "Sweep South B",
+      "leg": "Leg 4: Southbound"
+    },
+    {
+      "id": "WP-05",
+      "lat": 26.9114,
+      "lon": 75.7886,
+      "name": "Cross East B",
+      "leg": "Leg 5: Cross Track"
+    },
+    {
+      "id": "WP-06",
+      "lat": 26.9136,
+      "lon": 75.7886,
+      "name": "Sweep North C",
+      "leg": "Leg 6: Egress"
+    }
+  ]
 }

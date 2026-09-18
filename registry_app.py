@@ -28,6 +28,7 @@ DETECTIONS_FILE = "detections.json"
 SURVIVOR_LOG_FILE = "survivor_log.json"
 HAZARDS_FILE = "hazards.json"
 TELEMETRY_FILE = "telemetry.json"
+LIVE_FRAME_FILE = "live_frame.jpg"   # annotated frame written by detect.py
 
 CONDITION_OPTIONS = [
     "Wheelchair-bound / Paralysis",
@@ -117,6 +118,26 @@ def load_lora_packets():
         except Exception:
             return []
     return []
+
+
+def load_live_frame():
+    """Load the latest annotated frame written by detect.py. Returns bytes or None."""
+    if os.path.exists(LIVE_FRAME_FILE):
+        try:
+            # If the frame file is older than 15 seconds, camera is offline/stopped
+            if time.time() - os.path.getmtime(LIVE_FRAME_FILE) > 15.0:
+                return None
+            for _ in range(3):
+                try:
+                    with open(LIVE_FRAME_FILE, "rb") as f:
+                        data = f.read()
+                        if len(data) > 500:
+                            return data
+                except Exception:
+                    time.sleep(0.02)
+        except Exception:
+            return None
+    return None
 
 DEFAULT_SAR_WAYPOINTS = [
     {"id": "WP-01", "lat": 26.9114, "lon": 75.7860, "name": "Ingress Point", "leg": "Leg 1: Ingress"},
@@ -756,12 +777,50 @@ with tab_live:
             if not detections and not hazards:
                 st.info("ℹ️ No active detections in current camera frame. All recorded mission logs and registered profiles remain available below.")
 
-            col_map, col_queue = st.columns([2, 1])
+            col_feed, col_map, col_queue = st.columns([1.4, 2, 1])
+
+            with col_feed:
+                @st.fragment(run_every="1s")
+                def render_live_camera_feed():
+                    st.markdown("##### 📷 Live Drone Camera Feed")
+                    frame_bytes = load_live_frame()
+                    dets = load_detections()
+                    if frame_bytes:
+                        st.image(frame_bytes, width='stretch', caption="Edge-AI Annotated Feed (RGB / FLIR)")
+                        active_names = [d.get("name") or f"Survivor #{d.get('id')}" for d in dets]
+                        if active_names:
+                            _priority_order = {"CRITICAL": 0, "HIGH": 1, "MODERATE": 2, "NORMAL": 3}
+                            _sorted_detections = sorted(dets, key=lambda x: _priority_order.get(x.get("priority"), 5))
+                            _rows = [
+                                f"{PRIORITY_META.get(d.get('priority', 'NORMAL'), {}).get('emoji', '⚪')} "
+                                f"<b>{d.get('name') or 'Survivor #' + str(d.get('id'))}</b> — "
+                                f"<code>{d.get('priority', 'NORMAL')} ({d.get('priority_percent', 0)}%)</code>"
+                                for d in _sorted_detections
+                            ]
+                            st.markdown(
+                                "<div style='background:rgba(0,200,80,0.10);border-left:3px solid #00C853;"
+                                "padding:8px 12px;border-radius:6px;font-size:13px;margin-top:6px;'>"
+                                "<b>Detected in frame:</b><br>" +
+                                "<br>".join(_rows) +
+                                "</div>",
+                                unsafe_allow_html=True
+                            )
+                        else:
+                            st.info("No detections in current frame.", icon="🔍")
+                    else:
+                        st.markdown(
+                            "<div style='background:rgba(128,128,128,0.10);border:1px dashed #888;"
+                            "border-radius:8px;padding:24px;text-align:center;color:#888;font-size:14px;'>"
+                            "⏳ Waiting for drone camera feed…<br><small>Start <code>python run_system.py</code> to activate</small>"
+                            "</div>",
+                            unsafe_allow_html=True
+                        )
+                render_live_camera_feed()
 
             with col_map:
                 st.markdown("##### 📍 Real-Time Vector Radar (Zero-Flicker WebGL)")
                 deck = build_pydeck_map(telemetry, hazards, detections)
-                st.pydeck_chart(deck, use_container_width=True)
+                st.pydeck_chart(deck, width='stretch')
 
             with col_queue:
                 st.markdown("##### 🚨 Evacuation Priority Queue")
@@ -806,7 +865,7 @@ with tab_live:
                         "Medical Conditions": ", ".join(entry.get("conditions") or []) or "—",
                         "Notes": entry.get("health") or "—"
                     })
-                st.dataframe(rows, use_container_width=True, hide_index=True)
+                st.dataframe(rows, width='stretch', hide_index=True)
 
         render_vector_dashboard()
 
@@ -868,7 +927,44 @@ with tab_live:
 
         render_folium_text_components()
 
-        col_folium_map, col_folium_queue = st.columns([2, 1])
+        col_folium_feed, col_folium_map, col_folium_queue = st.columns([1.2, 2, 1])
+
+        with col_folium_feed:
+            @st.fragment(run_every="1s")
+            def render_folium_feed():
+                detections = load_detections()
+                st.markdown("##### 📷 Live Drone Camera Feed")
+                frame_bytes = load_live_frame()
+                if frame_bytes:
+                    st.image(frame_bytes, width='stretch', caption="Edge-AI Annotated Feed (RGB / FLIR)")
+                    _priority_order2 = {"CRITICAL": 0, "HIGH": 1, "MODERATE": 2, "NORMAL": 3}
+                    active = sorted(detections, key=lambda x: _priority_order2.get(x.get("priority"), 5))
+                    if active:
+                        _rows2 = [
+                            f"{PRIORITY_META.get(d.get('priority', 'NORMAL'), {}).get('emoji', '⚪')} "
+                            f"<b>{d.get('name') or 'Survivor #' + str(d.get('id'))}</b> — "
+                            f"<code>{d.get('priority', 'NORMAL')} ({d.get('priority_percent', 0)}%)</code>"
+                            for d in active
+                        ]
+                        st.markdown(
+                            "<div style='background:rgba(0,200,80,0.10);border-left:3px solid #00C853;"
+                            "padding:8px 12px;border-radius:6px;font-size:13px;margin-top:6px;'>"
+                            "<b>Detected in frame:</b><br>" +
+                            "<br>".join(_rows2) +
+                            "</div>",
+                            unsafe_allow_html=True
+                        )
+                    else:
+                        st.info("No detections in current frame.", icon="🔍")
+                else:
+                    st.markdown(
+                        "<div style='background:rgba(128,128,128,0.10);border:1px dashed #888;"
+                        "border-radius:8px;padding:24px;text-align:center;color:#888;font-size:14px;'>"
+                        "⏳ Waiting for drone camera feed…<br><small>Start <code>python run_system.py</code> to activate</small>"
+                        "</div>",
+                        unsafe_allow_html=True
+                    )
+            render_folium_feed()
 
         with col_folium_map:
             st.markdown("##### 📍 Street GIS Map (Stable Leaflet — Zero Flicker)")
@@ -878,6 +974,7 @@ with tab_live:
             folium_map = build_folium_map(telemetry_snapshot, hazards_snapshot, detections_snapshot)
             # returned_objects=[] prevents Leaflet click events from triggering unnecessary reruns
             st_folium(folium_map, width=None, height=480, key="stable_folium_map", returned_objects=[])
+
 
         with col_folium_queue:
             @st.fragment(run_every="2s")
@@ -930,7 +1027,7 @@ with tab_live:
                         "Medical Conditions": ", ".join(entry.get("conditions") or []) or "—",
                         "Notes": entry.get("health") or "—"
                     })
-                st.dataframe(rows, use_container_width=True, hide_index=True)
+                st.dataframe(rows, width='stretch', hide_index=True)
         render_live_log_only()
 
 # ---------------- TAB 2: AUTONOMOUS FLIGHT & SLAM NAVIGATION ----------------
@@ -1032,7 +1129,7 @@ with tab_nav:
         with c_map:
             st.markdown("##### 📍 Autonomous Lawnmower Search Pattern (3D Flight Vector)")
             nav_deck = build_nav_pydeck_map(telemetry)
-            st.pydeck_chart(nav_deck, use_container_width=True)
+            st.pydeck_chart(nav_deck, width='stretch')
 
             # Waypoint Flight Sequence Table
             st.markdown("###### 📋 Mission Waypoint Sequence & Execution Status")
@@ -1056,7 +1153,7 @@ with tab_nav:
                     "Longitude": f"{wp['lon']:.5f}",
                     "Status": stat_badge
                 })
-            st.dataframe(pd.DataFrame(wp_table_rows), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(wp_table_rows), width='stretch', hide_index=True)
 
     render_nav_tab()
 
@@ -1084,17 +1181,17 @@ with tab_reg:
 
         raw_photos = []
         if capture_mode == "📷 Capture live via webcam":
-            st.caption("Capture 2-4 distinct angles for robust multi-pose facial recognition.")
-            cam1 = st.camera_input("Angle 1 — Frontal View")
-            cam2 = st.camera_input("Angle 2 — Left Profile")
-            cam3 = st.camera_input("Angle 3 — Right Profile")
-            cam4 = st.camera_input("Angle 4 — Slightly distant / ambient lighting (Optional)")
-            for cam in [cam1, cam2, cam3, cam4]:
-                if cam is not None:
-                    raw_photos.append(cam)
+            st.info(
+                "💡 **Webcam Tip:** If `detect.py` is currently running, Windows gives it exclusive access to the camera hardware. "
+                "If the camera below shows an error or black box, use **'📁 Upload photo files'** or stop `detect.py` while enrolling.",
+                icon="ℹ️"
+            )
+            cam_photo = st.camera_input("Take Citizen Face Photo", key="citizen_enroll_cam")
+            if cam_photo is not None:
+                raw_photos.append(cam_photo)
         else:
             uploaded = st.file_uploader(
-                "Upload 2-4 clear face photos", type=["jpg", "jpeg", "png"], accept_multiple_files=True
+                "Upload 1-4 clear face photos", type=["jpg", "jpeg", "png"], accept_multiple_files=True
             )
             if uploaded:
                 raw_photos = uploaded
@@ -1309,7 +1406,7 @@ with tab_photo:
                 "age": matched_person["age"] if matched_person else None
             })
 
-        st.image(annotated, caption="AI Analyzed Aerial Drone Snapshot", use_container_width=True)
+        st.image(annotated, caption="AI Analyzed Aerial Drone Snapshot", width='stretch')
 
         st.subheader("Analysis Breakdown")
         if not reports:
